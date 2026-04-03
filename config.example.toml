@@ -8,28 +8,6 @@ refresh_token = "your-refresh-token"
 device_id = "0000000000000000000000000000000000000000000000000000000000000000"
 email = "user@example.com"
 
-[env]
-platform = "darwin"
-platform_raw = "darwin"
-arch = "arm64"
-node_version = "v24.3.0"
-terminal = "iTerm2.app"
-package_managers = "npm,pnpm"
-runtimes = "node"
-is_running_with_bun = false
-is_claude_ai_auth = true
-version = "2.1.91"
-version_base = "2.1.91"
-build_time = "2026-03-20T21:26:18Z"
-deployment_environment = "unknown-darwin"
-vcs = "git"
-
-[prompt_env]
-platform = "darwin"
-shell = "zsh"
-os_version = "Darwin 24.4.0"
-working_dir = "/Users/jack/projects"
-
 [process]
 constrained_memory = 34359738368
 rss_range = [300000000, 500000000]

@@ -20,13 +20,6 @@ import (
 )
 
 var (
-	platformPattern   = regexp.MustCompile(`Platform:\s*\S+`)
-	shellPattern      = regexp.MustCompile(`Shell:\s*\S+`)
-	osVersionPattern  = regexp.MustCompile(`OS Version:\s*[^\n<]+`)
-	workingDirPattern = regexp.MustCompile(`((?:Primary )?[Ww]orking directory:\s*)/\S+`)
-	workingDirPrefix  = regexp.MustCompile(`^/[^/]+/[^/]+/`)
-	homePrefixPattern = regexp.MustCompile(`/(?:Users|home)/[^/\s]+/`)
-	systemReminderTag = regexp.MustCompile(`(<system-reminder>)([\s\S]*?)(</system-reminder>)`)
 	billingHeaderLine = regexp.MustCompile(`x-anthropic-billing-header:[^\n]+\n?`)
 	billingHeaderText = regexp.MustCompile(`^\s*x-anthropic-billing-header:`)
 )
@@ -173,7 +166,7 @@ func rewriteMessagesBody(body []byte, config Config) ([]byte, error) {
 
 	if system, ok := jl.At("system"); ok {
 		if text, ok := system.AsString(); ok {
-			if err := system.Set(billingHeaderLine.ReplaceAllString(rewritePromptText(text, config), "")); err != nil {
+			if err := system.Set(billingHeaderLine.ReplaceAllString(text, "")); err != nil {
 				return nil, err
 			}
 		} else if blocks, ok := system.AsArrayIter(); ok {
@@ -187,9 +180,6 @@ func rewriteMessagesBody(body []byte, config Config) ([]byte, error) {
 						}
 						continue
 					}
-					if err := block.Set(rewritePromptText(text, config)); err != nil {
-						return nil, err
-					}
 					continue
 				}
 				if text, ok := block.At("text"); ok {
@@ -199,9 +189,6 @@ func rewriteMessagesBody(body []byte, config Config) ([]byte, error) {
 								return nil, err
 							}
 							continue
-						}
-						if err := text.Set(rewritePromptText(value, config)); err != nil {
-							return nil, err
 						}
 					}
 				}
@@ -222,38 +209,6 @@ func rewriteMessagesBody(body []byte, config Config) ([]byte, error) {
 				}
 				if err := system.Set(compacted); err != nil {
 					return nil, err
-				}
-			}
-		}
-	}
-
-	if messages, ok := jl.At("messages"); ok {
-		if items, ok := messages.AsArrayIter(); ok {
-			for item := range items {
-				content, ok := item.At("content")
-				if !ok {
-					continue
-				}
-				if text, ok := content.AsString(); ok {
-					if err := content.Set(rewriteSystemReminders(text, config)); err != nil {
-						return nil, err
-					}
-					continue
-				}
-				if blocks, ok := content.AsArrayIter(); ok {
-					for block := range blocks {
-						text, ok := block.At("text")
-						if !ok {
-							continue
-						}
-						value, ok := text.AsString()
-						if !ok {
-							continue
-						}
-						if err := text.Set(rewriteSystemReminders(value, config)); err != nil {
-							return nil, err
-						}
-					}
 				}
 			}
 		}
@@ -294,9 +249,6 @@ func rewriteEventLoggingBatchBody(body []byte, config Config) ([]byte, error) {
 		if _, ok := data["email"]; ok {
 			data["email"] = config.Identity.Email
 		}
-		if _, ok := data["env"]; ok {
-			data["env"] = buildCanonicalEnv(config)
-		}
 		if process, ok := data["process"]; ok {
 			data["process"] = rewriteProcess(process, config)
 		}
@@ -332,32 +284,6 @@ func rewriteGenericIdentityBody(body []byte, config Config) ([]byte, error) {
 	}
 
 	return json.Marshal(root)
-}
-
-func buildCanonicalEnv(config Config) map[string]any {
-	return map[string]any{
-		"platform":               config.Env.Platform,
-		"platform_raw":           config.Env.PlatformRaw,
-		"arch":                   config.Env.Arch,
-		"node_version":           config.Env.NodeVersion,
-		"terminal":               config.Env.Terminal,
-		"package_managers":       config.Env.PackageManagers,
-		"runtimes":               config.Env.Runtimes,
-		"is_running_with_bun":    config.Env.IsRunningWithBun,
-		"is_ci":                  false,
-		"is_claubbit":            false,
-		"is_claude_code_remote":  false,
-		"is_local_agent_mode":    false,
-		"is_conductor":           false,
-		"is_github_action":       false,
-		"is_claude_code_action":  false,
-		"is_claude_ai_auth":      config.Env.IsClaudeAIAuth,
-		"version":                config.Env.Version,
-		"version_base":           config.Env.VersionBase,
-		"build_time":             config.Env.BuildTime,
-		"deployment_environment": config.Env.DeploymentEnvironment,
-		"vcs":                    config.Env.VCS,
-	}
 }
 
 func rewriteProcess(original any, config Config) any {
@@ -426,30 +352,6 @@ func randomInRange(min, max int64) int64 {
 	return min + rand.Int64N(max-min+1)
 }
 
-func rewritePromptText(text string, config Config) string {
-	result := platformPattern.ReplaceAllString(text, "Platform: "+config.PromptEnv.Platform)
-	result = shellPattern.ReplaceAllString(result, "Shell: "+config.PromptEnv.Shell)
-	result = osVersionPattern.ReplaceAllString(result, "OS Version: "+config.PromptEnv.OSVersion)
-	result = workingDirPattern.ReplaceAllString(result, "$1"+config.PromptEnv.WorkingDir)
-
-	homePrefix := "/Users/user/"
-	if prefix := workingDirPrefix.FindString(config.PromptEnv.WorkingDir); prefix != "" {
-		homePrefix = prefix
-	}
-
-	return homePrefixPattern.ReplaceAllString(result, homePrefix)
-}
-
-func rewriteSystemReminders(text string, config Config) string {
-	return systemReminderTag.ReplaceAllStringFunc(text, func(match string) string {
-		parts := systemReminderTag.FindStringSubmatch(match)
-		if len(parts) != 4 {
-			return match
-		}
-		return parts[1] + rewritePromptText(parts[2], config) + parts[3]
-	})
-}
-
 func rewriteHeaders(dst, src http.Header, config Config) {
 	for key, values := range src {
 		value := strings.Join(values, ", ")
@@ -460,8 +362,6 @@ func rewriteHeaders(dst, src http.Header, config Config) {
 		switch strings.ToLower(key) {
 		case "host", "connection", "proxy-authorization", "proxy-connection", "transfer-encoding", "authorization", "content-length", "x-api-key", "x-anthropic-billing-header":
 			continue
-		case "user-agent":
-			dst.Set(key, fmt.Sprintf("claude-code/%s (external, cli)", config.Env.Version))
 		default:
 			dst.Set(key, value)
 		}
@@ -480,23 +380,19 @@ func copyResponseHeaders(dst, src http.Header) {
 }
 
 type Config struct {
-	Listen    string
-	Upstream  *url.URL
-	OAuth     OAuthConfig
-	Identity  IdentityConfig
-	Env       EnvConfig
-	PromptEnv PromptEnvConfig
-	Process   ProcessConfig
+	Listen   string
+	Upstream *url.URL
+	OAuth    OAuthConfig
+	Identity IdentityConfig
+	Process  ProcessConfig
 }
 
 type rawConfig struct {
-	Listen    *string         `toml:"listen"`
-	Upstream  *string         `toml:"upstream"`
-	OAuth     OAuthConfig     `toml:"oauth"`
-	Identity  IdentityConfig  `toml:"identity"`
-	Env       EnvConfig       `toml:"env"`
-	PromptEnv PromptEnvConfig `toml:"prompt_env"`
-	Process   ProcessConfig   `toml:"process"`
+	Listen   *string        `toml:"listen"`
+	Upstream *string        `toml:"upstream"`
+	OAuth    OAuthConfig    `toml:"oauth"`
+	Identity IdentityConfig `toml:"identity"`
+	Process  ProcessConfig  `toml:"process"`
 }
 
 type OAuthConfig struct {
@@ -506,30 +402,6 @@ type OAuthConfig struct {
 type IdentityConfig struct {
 	DeviceID string `toml:"device_id"`
 	Email    string `toml:"email"`
-}
-
-type EnvConfig struct {
-	Platform              string `toml:"platform"`
-	PlatformRaw           string `toml:"platform_raw"`
-	Arch                  string `toml:"arch"`
-	NodeVersion           string `toml:"node_version"`
-	Terminal              string `toml:"terminal"`
-	PackageManagers       string `toml:"package_managers"`
-	Runtimes              string `toml:"runtimes"`
-	IsRunningWithBun      bool   `toml:"is_running_with_bun"`
-	IsClaudeAIAuth        bool   `toml:"is_claude_ai_auth"`
-	Version               string `toml:"version"`
-	VersionBase           string `toml:"version_base"`
-	BuildTime             string `toml:"build_time"`
-	DeploymentEnvironment string `toml:"deployment_environment"`
-	VCS                   string `toml:"vcs"`
-}
-
-type PromptEnvConfig struct {
-	Platform   string `toml:"platform"`
-	Shell      string `toml:"shell"`
-	OSVersion  string `toml:"os_version"`
-	WorkingDir string `toml:"working_dir"`
 }
 
 type ProcessConfig struct {
@@ -575,23 +447,15 @@ func loadConfig(path string) (Config, error) {
 	if raw.Identity.DeviceID == "" || raw.Identity.Email == "" {
 		return Config{}, fmt.Errorf("config identity.device_id/email are required")
 	}
-	if raw.Env.Platform == "" || raw.Env.PlatformRaw == "" || raw.Env.Arch == "" || raw.Env.NodeVersion == "" || raw.Env.Terminal == "" || raw.Env.PackageManagers == "" || raw.Env.Runtimes == "" || raw.Env.Version == "" || raw.Env.VersionBase == "" || raw.Env.BuildTime == "" || raw.Env.DeploymentEnvironment == "" || raw.Env.VCS == "" {
-		return Config{}, fmt.Errorf("config env.platform/platform_raw/arch/node_version/terminal/package_managers/runtimes/version/version_base/build_time/deployment_environment/vcs are required")
-	}
-	if raw.PromptEnv.Platform == "" || raw.PromptEnv.Shell == "" || raw.PromptEnv.OSVersion == "" || raw.PromptEnv.WorkingDir == "" {
-		return Config{}, fmt.Errorf("config prompt_env.platform/shell/os_version/working_dir are required")
-	}
 	if raw.Process.ConstrainedMemory == 0 || raw.Process.RSSRange[0] == 0 || raw.Process.RSSRange[1] == 0 || raw.Process.HeapTotalRange[0] == 0 || raw.Process.HeapTotalRange[1] == 0 || raw.Process.HeapUsedRange[0] == 0 || raw.Process.HeapUsedRange[1] == 0 {
 		return Config{}, fmt.Errorf("config process.constrained_memory/rss_range/heap_total_range/heap_used_range are required")
 	}
 
 	return Config{
-		Listen:    listen,
-		Upstream:  upstreamURL,
-		OAuth:     raw.OAuth,
-		Identity:  raw.Identity,
-		Env:       raw.Env,
-		PromptEnv: raw.PromptEnv,
-		Process:   raw.Process,
+		Listen:   listen,
+		Upstream: upstreamURL,
+		OAuth:    raw.OAuth,
+		Identity: raw.Identity,
+		Process:  raw.Process,
 	}, nil
 }
