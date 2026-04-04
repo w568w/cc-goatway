@@ -3,21 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
-	"regexp"
-)
-
-var (
-	billingHeaderLine     = regexp.MustCompile(`x-anthropic-billing-header:[^\n]+\n?`)
-	billingHeaderText     = regexp.MustCompile(`^\s*x-anthropic-billing-header:`)
-	claudeCodeBetaHeaders = []string{
-		"claude-code-20250219",
-		oauthBetaHeader,
-		"context-1m-2025-08-07",
-		"redact-thinking-2026-02-12",
-		"context-management-2025-06-27",
-		"prompt-caching-scope-2026-01-05",
-		"effort-2025-11-24",
-	}
+	"strings"
 )
 
 func rewriteMessagesBody(body []byte, config Config, sessionID string) ([]byte, error) {
@@ -29,9 +15,8 @@ func rewriteMessagesBody(body []byte, config Config, sessionID string) ([]byte, 
 
 	delete(root, "tool_choice") // send by OpenCode, but not by Claude Code. Remove to avoid fingerprinting.
 
-	// TODO: Are they fine to omit?
-	// root["thinking"] = map[string]any{"type": "adaptive"}
-	// root["output_config"] = map[string]any{"effort": "medium"}
+	root["thinking"] = map[string]any{"type": "adaptive"}
+	root["output_config"] = map[string]any{"effort": "medium"}
 
 	metadata, _ := root["metadata"].(map[string]any)
 	if metadata == nil {
@@ -52,39 +37,126 @@ func rewriteMessagesBody(body []byte, config Config, sessionID string) ([]byte, 
 	}
 	metadata["user_id"] = string(encodedUserID)
 
-	if system, ok := root["system"]; ok {
-		root["system"] = rewriteMessagesSystem(system)
+	if isOpenCodeMessagesRequest(root) {
+		root["system"] = rewriteOpenCodeSystem(root["system"])
+		prependClaudeCodeReminder(root)
 	}
 
 	return json.Marshal(root)
 }
 
-func rewriteMessagesSystem(system any) any {
+func isOpenCodeMessagesRequest(root map[string]any) bool {
+	if strings.Contains(strings.ToLower(extractSystemText(root["system"])), "opencode") {
+		return true
+	}
+
+	tools, _ := root["tools"].([]any)
+	for _, rawTool := range tools {
+		tool, _ := rawTool.(map[string]any)
+		name, _ := tool["name"].(string)
+		switch {
+		case name == "question", name == "todowrite", strings.HasPrefix(name, "chrome-devtools_"):
+			return true
+		}
+	}
+
+	return false
+}
+
+func rewriteOpenCodeSystem(system any) []any {
+	text := strings.TrimSpace(sanitizeOpenCodeSystemText(extractSystemText(system)))
+	if text == "" {
+		text = "You are an interactive agent that helps users with software engineering tasks."
+	}
+
+	return []any{
+		claudeCodeSystemPrefix,
+		map[string]any{
+			"type": "text",
+			"text": "\n" + text,
+		},
+	}
+}
+
+func extractSystemText(system any) string {
 	switch value := system.(type) {
 	case string:
-		return billingHeaderLine.ReplaceAllString(value, "")
+		return value
 	case []any:
-		compacted := make([]any, 0, len(value))
+		parts := make([]string, 0, len(value))
 		for _, block := range value {
 			switch block := block.(type) {
 			case string:
-				if billingHeaderText.MatchString(block) {
-					continue
+				if block != "" {
+					parts = append(parts, block)
 				}
-				compacted = append(compacted, block)
 			case map[string]any:
-				text, _ := block["text"].(string)
-				if billingHeaderText.MatchString(text) {
-					continue
+				if text, _ := block["text"].(string); text != "" {
+					parts = append(parts, text)
 				}
-				compacted = append(compacted, block)
-			default:
-				compacted = append(compacted, block)
 			}
 		}
-		return compacted
+		return strings.Join(parts, "\n\n")
 	default:
-		return system
+		return ""
+	}
+}
+
+func sanitizeOpenCodeSystemText(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "You are OpenCode, the best coding agent on the planet.\n\n", "")
+	text = strings.ReplaceAll(text, "You are OpenCode, the best coding agent on the planet.", "")
+
+	paragraphs := strings.Split(text, "\n\n")
+	filtered := make([]string, 0, len(paragraphs))
+	for _, paragraph := range paragraphs {
+		trimmed := strings.TrimSpace(paragraph)
+		lower := strings.ToLower(trimmed)
+		if trimmed == "" {
+			continue
+		}
+		if strings.Contains(lower, "opencode.ai/docs") || strings.Contains(lower, "github.com/anomalyco/opencode") || strings.Contains(lower, "ctrl+p") {
+			continue
+		}
+		if strings.Contains(lower, "when the user directly asks about opencode") || strings.Contains(lower, "to give feedback") {
+			continue
+		}
+		if strings.Contains(lower, "todowrite tools") || strings.Contains(lower, "webfetch tool to gather information from opencode docs") {
+			continue
+		}
+		filtered = append(filtered, strings.ReplaceAll(paragraph, "OpenCode", "Claude Code"))
+	}
+
+	return strings.TrimSpace(strings.Join(filtered, "\n\n"))
+}
+
+func prependClaudeCodeReminder(root map[string]any) {
+	messages, _ := root["messages"].([]any)
+	if len(messages) == 0 {
+		return
+	}
+
+	first, _ := messages[0].(map[string]any)
+	if first == nil || first["role"] != "user" {
+		return
+	}
+
+	content := first["content"]
+	switch value := content.(type) {
+	case string:
+		first["content"] = []any{
+			map[string]any{"type": "text", "text": claudeCodeReminder},
+			map[string]any{"type": "text", "text": value},
+		}
+	case []any:
+		if len(value) > 0 {
+			if block, _ := value[0].(map[string]any); block != nil {
+				if text, _ := block["text"].(string); text == claudeCodeReminder {
+					return
+				}
+			}
+		}
+		first["content"] = append([]any{map[string]any{"type": "text", "text": claudeCodeReminder}}, value...)
 	}
 }
 
