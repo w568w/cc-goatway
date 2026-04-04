@@ -7,6 +7,7 @@ refresh_token = "your-refresh-token"
 [identity]
 device_id = "0000000000000000000000000000000000000000000000000000000000000000"
 email = "user@example.com"
+account_uuid = "00000000-0000-0000-0000-000000000000"
 
 [process]
 constrained_memory = 34359738368

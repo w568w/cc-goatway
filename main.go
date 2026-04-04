@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	cryptorand "crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -13,16 +15,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/BurntSushi/toml"
 )
 
-var (
-	billingHeaderLine = regexp.MustCompile(`x-anthropic-billing-header:[^\n]+\n?`)
-	billingHeaderText = regexp.MustCompile(`^\s*x-anthropic-billing-header:`)
-)
+const oauthBetaHeader = "oauth-2025-04-20"
 
 func main() {
 	configPath := flag.String("config", "config.toml", "config file path")
@@ -66,7 +64,7 @@ func main() {
 	}
 }
 
-func proxyToUpstream(w http.ResponseWriter, r *http.Request, config Config, oauth *oauthState, allowMissingAccessToken bool, rewrite func([]byte, Config) ([]byte, error)) {
+func proxyToUpstream(w http.ResponseWriter, r *http.Request, config Config, oauth *oauthState, allowMissingAccessToken bool, rewrite func([]byte, Config, string) ([]byte, error)) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
@@ -75,7 +73,13 @@ func proxyToUpstream(w http.ResponseWriter, r *http.Request, config Config, oaut
 	_ = r.Body.Close()
 	logRequest("incoming request", r.Method, r.URL.String(), r.Header, body)
 
-	rewrittenBody, err := rewrite(body, config)
+	// Generate a random session ID for this request if not already present.
+	sessionID := r.Header.Get("X-Claude-Code-Session-Id")
+	if r.URL.Path == "/v1/messages" && sessionID == "" {
+		sessionID = newSessionID()
+	}
+
+	rewrittenBody, err := rewrite(body, config, sessionID)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to rewrite request body: %v", err), http.StatusBadRequest)
 		return
@@ -84,7 +88,12 @@ func proxyToUpstream(w http.ResponseWriter, r *http.Request, config Config, oaut
 	upstreamRequestURL := *config.Upstream
 	upstreamRequestURL.Path = r.URL.Path
 	upstreamRequestURL.RawPath = ""
-	upstreamRequestURL.RawQuery = r.URL.RawQuery
+	query := r.URL.Query()
+	// Always use ?beta=true for /v1/messages because Claude Code uses it.
+	if r.URL.Path == "/v1/messages" && !query.Has("beta") {
+		query.Set("beta", "true")
+	}
+	upstreamRequestURL.RawQuery = query.Encode()
 
 	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamRequestURL.String(), bytes.NewReader(rewrittenBody))
 	if err != nil {
@@ -102,6 +111,12 @@ func proxyToUpstream(w http.ResponseWriter, r *http.Request, config Config, oaut
 		log.Printf("proxying without oauth access token: %s %s", r.Method, r.URL.String())
 	} else {
 		proxyReq.Header.Set("Authorization", "Bearer "+accessToken)
+		// Beside ?beta=true, we also need to ensure oauthHeader to use oauth authentication method.
+		ensureHeaderListValue(proxyReq.Header, "Anthropic-Beta", oauthBetaHeader)
+		if r.URL.Path == "/v1/messages" {
+			// Some more headers for /v1/messages to ensure the request looks like it's coming from the official client
+			standardizeMessagesHeaders(proxyReq.Header, sessionID)
+		}
 	}
 	logRequest("rewritten request", r.Method, upstreamRequestURL.String(), proxyReq.Header, rewrittenBody)
 	proxyReq.ContentLength = int64(len(rewrittenBody))
@@ -142,82 +157,7 @@ func logRequest(prefix, method, path string, headers http.Header, body []byte) {
 	log.Printf("%s\nmethod=%s\npath=%s\nheaders=\n%s\nbody=\n%s", prefix, method, path, string(headersJSON), string(body))
 }
 
-func rewriteMessagesBody(body []byte, config Config) ([]byte, error) {
-	jl, err := NewJSONLens(body)
-	if err != nil {
-		return body, nil
-	}
-
-	if userID, ok := jl.At("metadata", "user_id"); ok {
-		if rawUserID, ok := userID.AsString(); ok && rawUserID != "" {
-			inner, err := NewJSONLens([]byte(rawUserID))
-			if err == nil {
-				if deviceID, ok := inner.At("device_id"); ok {
-					if err := deviceID.Set(config.Identity.DeviceID); err != nil {
-						return nil, err
-					}
-				}
-				if err := userID.Set(string(inner.Bytes())); err != nil {
-					return nil, err
-				}
-			}
-		}
-	}
-
-	if system, ok := jl.At("system"); ok {
-		if text, ok := system.AsString(); ok {
-			if err := system.Set(billingHeaderLine.ReplaceAllString(text, "")); err != nil {
-				return nil, err
-			}
-		} else if blocks, ok := system.AsArrayIter(); ok {
-			for block := range blocks {
-				// remove billing header lines and rewrite prompt text in system blocks,
-				// which can be either string or object with a "text" field.
-				if text, ok := block.AsString(); ok {
-					if billingHeaderText.MatchString(text) {
-						if err := block.Set(nil); err != nil {
-							return nil, err
-						}
-						continue
-					}
-					continue
-				}
-				if text, ok := block.At("text"); ok {
-					if value, ok := text.AsString(); ok {
-						if billingHeaderText.MatchString(value) {
-							if err := block.Set(nil); err != nil {
-								return nil, err
-							}
-							continue
-						}
-					}
-				}
-			}
-			// Now trim out any null blocks that were removed due to billing headers.
-			array, ok := system.AsArray()
-			if ok {
-				compacted := make([]any, 0, len(array))
-				for _, item := range array {
-					if item.IsNull() {
-						continue
-					}
-					var value any
-					if err := json.Unmarshal(item.Bytes(), &value); err != nil {
-						return nil, err
-					}
-					compacted = append(compacted, value)
-				}
-				if err := system.Set(compacted); err != nil {
-					return nil, err
-				}
-			}
-		}
-	}
-
-	return jl.Bytes(), nil
-}
-
-func rewriteEventLoggingBatchBody(body []byte, config Config) ([]byte, error) {
+func rewriteEventLoggingBatchBody(body []byte, config Config, _ string) ([]byte, error) {
 	var parsed any
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return body, nil
@@ -265,7 +205,7 @@ func rewriteEventLoggingBatchBody(body []byte, config Config) ([]byte, error) {
 	return json.Marshal(parsed)
 }
 
-func rewriteGenericIdentityBody(body []byte, config Config) ([]byte, error) {
+func rewriteGenericIdentityBody(body []byte, config Config, _ string) ([]byte, error) {
 	var parsed any
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return body, nil
@@ -368,6 +308,36 @@ func rewriteHeaders(dst, src http.Header, config Config) {
 	}
 }
 
+func ensureHeaderListValue(headers http.Header, key, want string) {
+	for _, value := range headers.Values(key) {
+		for _, part := range strings.Split(value, ",") {
+			if strings.TrimSpace(part) == want {
+				return
+			}
+		}
+	}
+
+	existing := strings.TrimSpace(headers.Get(key))
+	if existing == "" {
+		headers.Set(key, want)
+		return
+	}
+
+	headers.Set(key, existing+", "+want)
+}
+
+func newSessionID() string {
+	buf := make([]byte, 16)
+	if _, err := cryptorand.Read(buf); err != nil {
+		// It couldn't be.
+		panic(err)
+	}
+	buf[6] = (buf[6] & 0x0f) | 0x40
+	buf[8] = (buf[8] & 0x3f) | 0x80
+	hexValue := hex.EncodeToString(buf)
+	return fmt.Sprintf("%s-%s-%s-%s-%s", hexValue[:8], hexValue[8:12], hexValue[12:16], hexValue[16:20], hexValue[20:32])
+}
+
 func copyResponseHeaders(dst, src http.Header) {
 	for key, values := range src {
 		if strings.EqualFold(key, "Transfer-Encoding") {
@@ -400,8 +370,9 @@ type OAuthConfig struct {
 }
 
 type IdentityConfig struct {
-	DeviceID string `toml:"device_id"`
-	Email    string `toml:"email"`
+	DeviceID    string `toml:"device_id"`
+	Email       string `toml:"email"`
+	AccountUUID string `toml:"account_uuid"`
 }
 
 type ProcessConfig struct {
@@ -444,8 +415,8 @@ func loadConfig(path string) (Config, error) {
 	if raw.OAuth.RefreshToken == "" {
 		return Config{}, fmt.Errorf("config oauth.refresh_token is required")
 	}
-	if raw.Identity.DeviceID == "" || raw.Identity.Email == "" {
-		return Config{}, fmt.Errorf("config identity.device_id/email are required")
+	if raw.Identity.DeviceID == "" || raw.Identity.Email == "" || raw.Identity.AccountUUID == "" {
+		return Config{}, fmt.Errorf("config identity.device_id/email/account_uuid are required")
 	}
 	if raw.Process.ConstrainedMemory == 0 || raw.Process.RSSRange[0] == 0 || raw.Process.RSSRange[1] == 0 || raw.Process.HeapTotalRange[0] == 0 || raw.Process.HeapTotalRange[1] == 0 || raw.Process.HeapUsedRange[0] == 0 || raw.Process.HeapUsedRange[1] == 0 {
 		return Config{}, fmt.Errorf("config process.constrained_memory/rss_range/heap_total_range/heap_used_range are required")
