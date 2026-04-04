@@ -10,6 +10,8 @@
 
 问你的 Claude Code，别问我。
 
+哦，我让 AI 读了 [cc-gateway](https://github.com/motiful/cc-gateway)。虽然这***肯定***和本项目没有任何关系，但感谢作者的灵感！
+
 ## 3. 人工编码？
 
 人工编码！~~因为 GPT 实在他妈的蠢~~。
