@@ -132,7 +132,8 @@ func proxyToUpstream(w http.ResponseWriter, r *http.Request, config Config, oaut
 
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	if _, err := io.Copy(w, resp.Body); err != nil {
+	rc := http.NewResponseController(w)
+	if _, err := io.Copy(flushWriter{w, rc}, resp.Body); err != nil {
 		log.Printf("response copy error: %s %s: %v", r.Method, r.URL.String(), err)
 	}
 }
@@ -336,6 +337,17 @@ func newSessionID() string {
 	buf[8] = (buf[8] & 0x3f) | 0x80
 	hexValue := hex.EncodeToString(buf)
 	return fmt.Sprintf("%s-%s-%s-%s-%s", hexValue[:8], hexValue[8:12], hexValue[12:16], hexValue[16:20], hexValue[20:32])
+}
+
+type flushWriter struct {
+	w  io.Writer
+	rc *http.ResponseController
+}
+
+func (fw flushWriter) Write(p []byte) (int, error) {
+	n, err := fw.w.Write(p)
+	fw.rc.Flush()
+	return n, err
 }
 
 func copyResponseHeaders(dst, src http.Header) {
