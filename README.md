@@ -1,21 +1,23 @@
 # CC Goatway
 
-让你的山羊可以使用 Anthropic API。
+[中文](./README.zh-CN.md) | English
 
-## 1. 如何使用
+Let your goat use the Anthropic API.
 
-参考 config.example.toml 来配置你的 config.toml 文件。然后运行！
+## 1. How to Use
 
-## 2. 这到底是什么？
+Refer to `config.example.toml` to prepare your `config.toml`, then run it.
 
-问你的 Claude Code，别问我。
+## 2. What Even Is This?
 
-哦，我让 AI 读了 [cc-gateway](https://github.com/motiful/cc-gateway)。虽然这***肯定***和本项目没有任何关系，但感谢作者的灵感！
+Ask your Claude Code, not me.
 
-## 3. 人工编码？
+Oh, and I had AI read [cc-gateway](https://github.com/motiful/cc-gateway). While this ***definitely*** has nothing to do with this project, thanks to the author for the inspiration.
 
-人工编码！~~因为 GPT 实在他妈的蠢~~。
+## 3. Human Code?
 
-## 4. 许可证
+Human code! ~~Because GPT-5.4 is really dumb~~.
+
+## 4. License
 
 Apache License 2.0
