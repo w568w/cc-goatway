@@ -64,7 +64,7 @@ func main() {
 	}
 }
 
-func proxyToUpstream(w http.ResponseWriter, r *http.Request, config Config, oauth *oauthState, allowMissingAccessToken bool, rewrite func([]byte, Config, string) ([]byte, error)) {
+func proxyToUpstream(w http.ResponseWriter, r *http.Request, config Config, oauth *oauthState, allowMissingAccessToken bool, rewrite func([]byte, Config, string, string) ([]byte, error)) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
@@ -79,7 +79,7 @@ func proxyToUpstream(w http.ResponseWriter, r *http.Request, config Config, oaut
 		sessionID = newSessionID()
 	}
 
-	rewrittenBody, err := rewrite(body, config, sessionID)
+	rewrittenBody, err := rewrite(body, config, sessionID, r.Header.Get("User-Agent"))
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to rewrite request body: %v", err), http.StatusBadRequest)
 		return
@@ -158,7 +158,7 @@ func logRequest(prefix, method, path string, headers http.Header, body []byte) {
 	log.Printf("%s\nmethod=%s\npath=%s\nheaders=\n%s\nbody=\n%s", prefix, method, path, string(headersJSON), string(body))
 }
 
-func rewriteEventLoggingBatchBody(body []byte, config Config, _ string) ([]byte, error) {
+func rewriteEventLoggingBatchBody(body []byte, config Config, _ string, _ string) ([]byte, error) {
 	var parsed any
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return body, nil
@@ -206,7 +206,7 @@ func rewriteEventLoggingBatchBody(body []byte, config Config, _ string) ([]byte,
 	return json.Marshal(parsed)
 }
 
-func rewriteGenericIdentityBody(body []byte, config Config, _ string) ([]byte, error) {
+func rewriteGenericIdentityBody(body []byte, config Config, _ string, _ string) ([]byte, error) {
 	var parsed any
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return body, nil

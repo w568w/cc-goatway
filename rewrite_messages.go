@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-func rewriteMessagesBody(body []byte, config Config, sessionID string) ([]byte, error) {
+func rewriteMessagesBody(body []byte, config Config, sessionID string, userAgent string) ([]byte, error) {
 	var root map[string]any
 	if err := json.Unmarshal(body, &root); err != nil {
 		// Non-JSON body, return as-is
@@ -37,7 +37,7 @@ func rewriteMessagesBody(body []byte, config Config, sessionID string) ([]byte, 
 	}
 	metadata["user_id"] = string(encodedUserID)
 
-	if isOpenCodeMessagesRequest(root) {
+	if isOpenCodeMessagesRequest(root, userAgent) {
 		root["system"] = rewriteOpenCodeSystem(root["system"])
 		prependClaudeCodeReminder(root)
 	}
@@ -45,7 +45,10 @@ func rewriteMessagesBody(body []byte, config Config, sessionID string) ([]byte, 
 	return json.Marshal(root)
 }
 
-func isOpenCodeMessagesRequest(root map[string]any) bool {
+func isOpenCodeMessagesRequest(root map[string]any, userAgent string) bool {
+	if strings.Contains(strings.ToLower(userAgent), "opencode") {
+		return true
+	}
 	if strings.Contains(strings.ToLower(extractSystemText(root["system"])), "opencode") {
 		return true
 	}
