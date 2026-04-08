@@ -67,18 +67,48 @@ func isOpenCodeMessagesRequest(root map[string]any, userAgent string) bool {
 }
 
 func rewriteOpenCodeSystem(system any) []any {
-	text := strings.TrimSpace(sanitizeOpenCodeSystemText(extractSystemText(system)))
-	if text == "" {
-		text = "You are an interactive agent that helps users with software engineering tasks."
+	original := strings.TrimSpace(extractSystemText(system))
+	rewritten := original
+
+	switch detectOpenCodeMode(original) {
+	case "plan":
+		rewritten = planModeSystemPrompt
+	case "build":
+		rewritten = buildModeSystemPrompt
+	case "other":
+		if rewritten == "" {
+			rewritten = "You are an interactive agent that helps users with software engineering tasks."
+		}
 	}
 
 	return []any{
 		claudeCodeSystemPrefix,
 		map[string]any{
 			"type": "text",
-			"text": "\n" + text,
+			"text": "\n" + rewritten,
 		},
 	}
+}
+
+func detectOpenCodeMode(systemText string) string {
+	lower := strings.ToLower(systemText)
+
+	if strings.Contains(lower, "plan mode active") ||
+		(strings.Contains(lower, "read-only") && strings.Contains(lower, "must not make any edits")) {
+		return "plan"
+	}
+
+	if strings.Contains(lower, "your operational mode has changed from plan to build") ||
+		strings.Contains(lower, "you are no longer in read-only mode") {
+		return "build"
+	}
+
+	if strings.Contains(lower, "you are opencode, the best coding agent on the planet.") ||
+		strings.Contains(lower, "interactive cli tool that helps users with software engineering tasks") {
+		return "build"
+	}
+
+	return "other"
 }
 
 func extractSystemText(system any) string {
