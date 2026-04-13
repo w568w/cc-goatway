@@ -2,6 +2,8 @@ listen = ":8443"
 upstream = "https://api.anthropic.com"
 
 [oauth]
+# set to "__FROM_CLAUDE_CREDENTIALS__" to read tokens from
+# $CLAUDE_CONFIG_DIR/.credentials.json or ~/.claude/.credentials.json
 refresh_token = "your-refresh-token"
 
 [identity]
