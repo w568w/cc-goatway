@@ -3,8 +3,15 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
+
+const mcpToolPrefix = "mcp_"
+
+var toolNameWithPrefixPattern = regexp.MustCompile(`("name"\s*:\s*")mcp_([^"]+)(")`)
 
 func rewriteMessagesBody(body []byte, config Config, sessionID string, userAgent string) ([]byte, error) {
 	var root map[string]any
@@ -39,10 +46,19 @@ func rewriteMessagesBody(body []byte, config Config, sessionID string, userAgent
 
 	if isOpenCodeMessagesRequest(root, userAgent) {
 		root["system"] = rewriteOpenCodeSystem(root["system"])
+		prefixOpenCodeToolNames(root)
 		prependClaudeCodeReminder(root)
 	}
 
 	return json.Marshal(root)
+}
+
+func isOpenCodeMessagesRequestBody(body []byte, userAgent string) bool {
+	var root map[string]any
+	if err := json.Unmarshal(body, &root); err != nil {
+		return false
+	}
+	return isOpenCodeMessagesRequest(root, userAgent)
 }
 
 func isOpenCodeMessagesRequest(root map[string]any, userAgent string) bool {
@@ -161,6 +177,90 @@ func sanitizeOpenCodeSystemText(text string) string {
 	}
 
 	return strings.TrimSpace(strings.Join(filtered, "\n\n"))
+}
+
+func prefixOpenCodeToolNames(root map[string]any) {
+	tools, _ := root["tools"].([]any)
+	for _, rawTool := range tools {
+		tool, _ := rawTool.(map[string]any)
+		if tool == nil {
+			continue
+		}
+		name, _ := tool["name"].(string)
+		if name == "" {
+			continue
+		}
+		tool["name"] = prefixToolName(name)
+	}
+
+	messages, _ := root["messages"].([]any)
+	for _, rawMessage := range messages {
+		message, _ := rawMessage.(map[string]any)
+		if message == nil {
+			continue
+		}
+		content, _ := message["content"].([]any)
+		for _, rawBlock := range content {
+			block, _ := rawBlock.(map[string]any)
+			if block == nil {
+				continue
+			}
+			if blockType, _ := block["type"].(string); blockType != "tool_use" {
+				continue
+			}
+			name, _ := block["name"].(string)
+			if name == "" {
+				continue
+			}
+			block["name"] = prefixToolName(name)
+		}
+	}
+}
+
+func prefixToolName(name string) string {
+	if strings.HasPrefix(name, mcpToolPrefix) {
+		return mcpToolPrefix + uppercaseFirst(name[len(mcpToolPrefix):])
+	}
+	return mcpToolPrefix + uppercaseFirst(name)
+}
+
+func unprefixToolName(name string) string {
+	if !strings.HasPrefix(name, mcpToolPrefix) {
+		return name
+	}
+	return lowercaseFirst(name[len(mcpToolPrefix):])
+}
+
+func stripToolPrefixInJSONText(text string) string {
+	return toolNameWithPrefixPattern.ReplaceAllStringFunc(text, func(match string) string {
+		groups := toolNameWithPrefixPattern.FindStringSubmatch(match)
+		if len(groups) != 4 {
+			return match
+		}
+		return groups[1] + unprefixToolName(mcpToolPrefix+groups[2]) + groups[3]
+	})
+}
+
+func uppercaseFirst(value string) string {
+	if value == "" {
+		return value
+	}
+	r, size := utf8.DecodeRuneInString(value)
+	if r == utf8.RuneError && size == 0 {
+		return value
+	}
+	return string(unicode.ToUpper(r)) + value[size:]
+}
+
+func lowercaseFirst(value string) string {
+	if value == "" {
+		return value
+	}
+	r, size := utf8.DecodeRuneInString(value)
+	if r == utf8.RuneError && size == 0 {
+		return value
+	}
+	return string(unicode.ToLower(r)) + value[size:]
 }
 
 func prependClaudeCodeReminder(root map[string]any) {

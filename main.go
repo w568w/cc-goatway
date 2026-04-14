@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	cryptorand "crypto/rand"
 	"encoding/base64"
@@ -15,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -78,6 +80,7 @@ func proxyToUpstream(w http.ResponseWriter, r *http.Request, config Config, oaut
 	if r.URL.Path == "/v1/messages" && sessionID == "" {
 		sessionID = newSessionID()
 	}
+	isOpenCodeReq := r.URL.Path == "/v1/messages" && isOpenCodeMessagesRequestBody(body, r.Header.Get("User-Agent"))
 
 	rewrittenBody, err := rewrite(body, config, sessionID, r.Header.Get("User-Agent"))
 	if err != nil {
@@ -114,6 +117,11 @@ func proxyToUpstream(w http.ResponseWriter, r *http.Request, config Config, oaut
 		// Beside ?beta=true, we also need to ensure oauthHeader to use oauth authentication method.
 		ensureHeaderListValue(proxyReq.Header, "Anthropic-Beta", oauthBetaHeader)
 		if r.URL.Path == "/v1/messages" {
+			if isOpenCodeReq {
+				// We need plain response bytes for SSE/JSON tool-name rewrite.
+				// Compressed payloads (br/zstd) cannot be rewritten safely in-stream.
+				proxyReq.Header.Set("Accept-Encoding", "identity")
+			}
 			// Some more headers for /v1/messages to ensure the request looks like it's coming from the official client
 			standardizeMessagesHeaders(proxyReq.Header, sessionID)
 		}
@@ -130,12 +138,87 @@ func proxyToUpstream(w http.ResponseWriter, r *http.Request, config Config, oaut
 	}
 	defer resp.Body.Close()
 
+	responseBody := io.Reader(resp.Body)
+	if r.URL.Path == "/v1/messages" && isOpenCodeReq {
+		responseBody = rewriteOpenCodeMessagesResponse(resp)
+	}
+
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	rc := http.NewResponseController(w)
-	if _, err := io.Copy(flushWriter{w, rc}, resp.Body); err != nil {
+	if _, err := io.Copy(flushWriter{w, rc}, responseBody); err != nil {
 		log.Printf("response copy error: %s %s: %v", r.Method, r.URL.String(), err)
 	}
+}
+
+func rewriteOpenCodeMessagesResponse(resp *http.Response) io.Reader {
+	contentEncoding := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
+	if contentEncoding != "" && contentEncoding != "identity" {
+		return resp.Body
+	}
+
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+	if strings.Contains(contentType, "text/event-stream") {
+		resp.Header.Del("Content-Length")
+		return newSSEToolNameRewriteReader(resp.Body)
+	}
+
+	if strings.Contains(contentType, "application/json") {
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Printf("failed to read messages response body for rewrite: %v", err)
+			return bytes.NewReader(body)
+		}
+		rewritten := stripToolPrefixInJSONText(string(body))
+		rewrittenBody := []byte(rewritten)
+		resp.Header.Set("Content-Length", strconv.Itoa(len(rewrittenBody)))
+		return bytes.NewReader(rewrittenBody)
+	}
+
+	return resp.Body
+}
+
+func newSSEToolNameRewriteReader(src io.Reader) io.Reader {
+	pipeReader, pipeWriter := io.Pipe()
+	go func() {
+		defer pipeWriter.Close()
+		reader := bufio.NewReader(src)
+		for {
+			line, err := reader.ReadBytes('\n')
+			if len(line) > 0 {
+				rewritten := rewriteSSEDataLine(line)
+				if _, writeErr := pipeWriter.Write(rewritten); writeErr != nil {
+					return
+				}
+			}
+			if err != nil {
+				if err != io.EOF {
+					_ = pipeWriter.CloseWithError(err)
+				}
+				return
+			}
+		}
+	}()
+	return pipeReader
+}
+
+func rewriteSSEDataLine(line []byte) []byte {
+	if !bytes.HasPrefix(line, []byte("data: ")) {
+		return line
+	}
+
+	payload := line[len("data: "):]
+	trimmed := strings.TrimSpace(string(payload))
+	if trimmed == "" || trimmed == "[DONE]" {
+		return line
+	}
+
+	rewritten := stripToolPrefixInJSONText(string(payload))
+	if rewritten == string(payload) {
+		return line
+	}
+
+	return append([]byte("data: "), []byte(rewritten)...)
 }
 
 func setupFileLogger(configPath string) error {
