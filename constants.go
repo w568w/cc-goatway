@@ -42,7 +42,7 @@ const claudeCodeSystemPrompt = "\n" +
 	"\n" +
 	"# Memory\n" +
 	"\n" +
-	"You have a persistent file-based memory at `/root/.claude/projects/-root-claude-code-gateway/memory/`. This directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence). Each memory is one file holding one fact, with frontmatter:\n" +
+	"You have persistent file-based memory available in the current project. Each memory is one file holding one fact, with frontmatter:\n" +
 	"\n" +
 	"```markdown\n" +
 	"---\n" +
@@ -65,7 +65,7 @@ const claudeCodeSystemPrompt = "\n" +
 	"\n" +
 	"# Environment\n" +
 	"You have been invoked in the following environment: \n" +
-	" - Primary working directory: /root/claude-code-gateway\n" +
+	" - Primary working directory: current project directory\n" +
 	" - Is a git repository: false\n" +
 	" - Platform: linux\n" +
 	" - Shell: bash\n" +
