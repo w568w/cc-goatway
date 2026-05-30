@@ -19,6 +19,7 @@ func rewriteMessagesBody(body []byte, config Config, sessionID string, userAgent
 		// Non-JSON body, return as-is
 		return body, nil
 	}
+	addGatewayCacheControl := !hasCacheControl(root)
 
 	delete(root, "tool_choice") // send by OpenCode, but not by Claude Code. Remove to avoid fingerprinting.
 
@@ -52,11 +53,11 @@ func rewriteMessagesBody(body []byte, config Config, sessionID string, userAgent
 	metadata["user_id"] = string(encodedUserID)
 
 	if isOpenCodeMessagesRequest(root, userAgent) {
-		root["system"] = rewriteOpenCodeSystem(root["system"])
+		root["system"] = rewriteOpenCodeSystem(root["system"], addGatewayCacheControl)
 		prefixOpenCodeToolNames(root)
 		prependClaudeCodeReminder(root)
 	}
-	ensureClaudeCodeSystem(root)
+	ensureClaudeCodeSystem(root, addGatewayCacheControl)
 
 	return json.Marshal(root)
 }
@@ -90,7 +91,7 @@ func isOpenCodeMessagesRequest(root map[string]any, userAgent string) bool {
 	return false
 }
 
-func rewriteOpenCodeSystem(system any) []any {
+func rewriteOpenCodeSystem(system any, addCacheControl bool) []any {
 	original := strings.TrimSpace(extractSystemText(system))
 	rewritten := original
 
@@ -105,17 +106,21 @@ func rewriteOpenCodeSystem(system any) []any {
 		}
 	}
 
+	rewrittenBlock := map[string]any{
+		"type": "text",
+		"text": rewritten,
+	}
+	if addCacheControl {
+		rewrittenBlock["cache_control"] = map[string]any{"type": "ephemeral"}
+	}
+
 	return []any{
-		claudeCodeSystemPrefix,
-		map[string]any{
-			"type":          "text",
-			"text":          rewritten,
-			"cache_control": map[string]any{"type": "ephemeral"},
-		},
+		claudeCodeSystemPrefixBlock(addCacheControl),
+		rewrittenBlock,
 	}
 }
 
-func ensureClaudeCodeSystem(root map[string]any) {
+func ensureClaudeCodeSystem(root map[string]any, addCacheControl bool) {
 	current := normalizeSystemBlocks(root["system"])
 	if len(current) >= 2 && systemBlockText(current[0]) == systemBlockText(claudeCodeSystemPrefix) && systemBlockText(current[1]) == claudeCodeSystemPrompt {
 		root["system"] = current
@@ -131,7 +136,29 @@ func ensureClaudeCodeSystem(root map[string]any) {
 		filtered = append(filtered, block)
 	}
 
-	root["system"] = append([]any{claudeCodeSystemPrefix, claudeCodeSystemBlock()}, filtered...)
+	root["system"] = append([]any{claudeCodeSystemPrefixBlock(addCacheControl), claudeCodeSystemBlock(addCacheControl)}, filtered...)
+}
+
+func hasCacheControl(value any) bool {
+	switch value := value.(type) {
+	case map[string]any:
+		if _, ok := value["cache_control"]; ok {
+			return true
+		}
+		for _, child := range value {
+			if hasCacheControl(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range value {
+			if hasCacheControl(child) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func normalizeSystemBlocks(system any) []any {
@@ -150,12 +177,26 @@ func normalizeSystemBlocks(system any) []any {
 	}
 }
 
-func claudeCodeSystemBlock() map[string]any {
-	return map[string]any{
-		"type":          "text",
-		"text":          claudeCodeSystemPrompt,
-		"cache_control": map[string]any{"type": "ephemeral"},
+func claudeCodeSystemPrefixBlock(addCacheControl bool) map[string]any {
+	block := map[string]any{
+		"type": "text",
+		"text": systemBlockText(claudeCodeSystemPrefix),
 	}
+	if addCacheControl {
+		block["cache_control"] = map[string]any{"type": "ephemeral"}
+	}
+	return block
+}
+
+func claudeCodeSystemBlock(addCacheControl bool) map[string]any {
+	block := map[string]any{
+		"type": "text",
+		"text": claudeCodeSystemPrompt,
+	}
+	if addCacheControl {
+		block["cache_control"] = map[string]any{"type": "ephemeral"}
+	}
+	return block
 }
 
 func systemBlockText(block any) string {
