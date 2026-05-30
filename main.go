@@ -3,6 +3,9 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	cryptorand "crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -20,6 +23,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
 )
 
 const oauthBetaHeader = "oauth-2025-04-20"
@@ -117,11 +122,6 @@ func proxyToUpstream(w http.ResponseWriter, r *http.Request, config Config, oaut
 		// Beside ?beta=true, we also need to ensure oauthHeader to use oauth authentication method.
 		ensureHeaderListValue(proxyReq.Header, "Anthropic-Beta", oauthBetaHeader)
 		if r.URL.Path == "/v1/messages" {
-			if isOpenCodeReq {
-				// We need plain response bytes for SSE/JSON tool-name rewrite.
-				// Compressed payloads (br/zstd) cannot be rewritten safely in-stream.
-				proxyReq.Header.Set("Accept-Encoding", "identity")
-			}
 			// Some more headers for /v1/messages to ensure the request looks like it's coming from the official client
 			standardizeMessagesHeaders(proxyReq.Header, sessionID)
 		}
@@ -152,19 +152,19 @@ func proxyToUpstream(w http.ResponseWriter, r *http.Request, config Config, oaut
 }
 
 func rewriteOpenCodeMessagesResponse(resp *http.Response) io.Reader {
-	contentEncoding := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
-	if contentEncoding != "" && contentEncoding != "identity" {
+	body := decodeResponseBody(resp)
+	if body == nil {
 		return resp.Body
 	}
 
 	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 	if strings.Contains(contentType, "text/event-stream") {
 		resp.Header.Del("Content-Length")
-		return newSSEToolNameRewriteReader(resp.Body)
+		return newSSEToolNameRewriteReader(body)
 	}
 
 	if strings.Contains(contentType, "application/json") {
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(body)
 		if err != nil {
 			log.Printf("failed to read messages response body for rewrite: %v", err)
 			return bytes.NewReader(body)
@@ -176,6 +176,84 @@ func rewriteOpenCodeMessagesResponse(resp *http.Response) io.Reader {
 	}
 
 	return resp.Body
+}
+
+func decodeResponseBody(resp *http.Response) io.Reader {
+	encodings := responseContentEncodings(resp.Header.Get("Content-Encoding"))
+	if len(encodings) == 0 {
+		return resp.Body
+	}
+
+	body := io.Reader(resp.Body)
+	closers := make([]io.Closer, 0, len(encodings))
+	for i := len(encodings) - 1; i >= 0; i-- {
+		encoding := encodings[i]
+		switch encoding {
+		case "gzip":
+			reader, err := gzip.NewReader(body)
+			if err != nil {
+				log.Printf("failed to decode gzip response: %v", err)
+				return nil
+			}
+			body = reader
+			closers = append(closers, reader)
+		case "deflate":
+			buffered := bufio.NewReader(body)
+			reader, err := zlib.NewReader(buffered)
+			if err != nil {
+				reader = flate.NewReader(buffered)
+			}
+			body = reader
+			closers = append(closers, reader)
+		case "br":
+			body = brotli.NewReader(body)
+		case "zstd":
+			reader, err := zstd.NewReader(body)
+			if err != nil {
+				log.Printf("failed to decode zstd response: %v", err)
+				return nil
+			}
+			body = reader
+			closers = append(closers, reader.IOReadCloser())
+		default:
+			log.Printf("unsupported response content encoding %q", encoding)
+			return nil
+		}
+	}
+
+	resp.Header.Del("Content-Encoding")
+	resp.Header.Del("Content-Length")
+	return &closeAfterEOFReader{Reader: body, closers: closers}
+}
+
+func responseContentEncodings(value string) []string {
+	parts := strings.Split(value, ",")
+	encodings := make([]string, 0, len(parts))
+	for _, part := range parts {
+		encoding := strings.ToLower(strings.TrimSpace(part))
+		if encoding == "" || encoding == "identity" {
+			continue
+		}
+		encodings = append(encodings, encoding)
+	}
+	return encodings
+}
+
+type closeAfterEOFReader struct {
+	io.Reader
+	closers []io.Closer
+	closed  bool
+}
+
+func (r *closeAfterEOFReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if err != nil && !r.closed {
+		r.closed = true
+		for _, closer := range r.closers {
+			_ = closer.Close()
+		}
+	}
+	return n, err
 }
 
 func newSSEToolNameRewriteReader(src io.Reader) io.Reader {
