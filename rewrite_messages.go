@@ -23,7 +23,14 @@ func rewriteMessagesBody(body []byte, config Config, sessionID string, userAgent
 	delete(root, "tool_choice") // send by OpenCode, but not by Claude Code. Remove to avoid fingerprinting.
 
 	root["thinking"] = map[string]any{"type": "adaptive"}
-	root["output_config"] = map[string]any{"effort": "medium"}
+	root["output_config"] = map[string]any{"effort": "high"}
+	if _, ok := root["context_management"]; !ok {
+		root["context_management"] = map[string]any{
+			"edits": []any{
+				map[string]any{"type": "clear_thinking_20251015", "keep": "all"},
+			},
+		}
+	}
 
 	metadata, _ := root["metadata"].(map[string]any)
 	if metadata == nil {
@@ -49,6 +56,7 @@ func rewriteMessagesBody(body []byte, config Config, sessionID string, userAgent
 		prefixOpenCodeToolNames(root)
 		prependClaudeCodeReminder(root)
 	}
+	ensureClaudeCodeSystem(root)
 
 	return json.Marshal(root)
 }
@@ -100,10 +108,63 @@ func rewriteOpenCodeSystem(system any) []any {
 	return []any{
 		claudeCodeSystemPrefix,
 		map[string]any{
-			"type": "text",
-			"text": "\n" + rewritten,
+			"type":          "text",
+			"text":          rewritten,
+			"cache_control": map[string]any{"type": "ephemeral"},
 		},
 	}
+}
+
+func ensureClaudeCodeSystem(root map[string]any) {
+	current := normalizeSystemBlocks(root["system"])
+	if len(current) >= 2 && systemBlockText(current[0]) == systemBlockText(claudeCodeSystemPrefix) && systemBlockText(current[1]) == claudeCodeSystemPrompt {
+		root["system"] = current
+		return
+	}
+
+	filtered := make([]any, 0, len(current)+2)
+	for _, block := range current {
+		text := systemBlockText(block)
+		if text == systemBlockText(claudeCodeSystemPrefix) || text == claudeCodeSystemPrompt {
+			continue
+		}
+		filtered = append(filtered, block)
+	}
+
+	root["system"] = append([]any{claudeCodeSystemPrefix, claudeCodeSystemBlock()}, filtered...)
+}
+
+func normalizeSystemBlocks(system any) []any {
+	switch value := system.(type) {
+	case nil:
+		return nil
+	case string:
+		if value == "" {
+			return nil
+		}
+		return []any{map[string]any{"type": "text", "text": value}}
+	case []any:
+		return value
+	default:
+		return []any{value}
+	}
+}
+
+func claudeCodeSystemBlock() map[string]any {
+	return map[string]any{
+		"type":          "text",
+		"text":          claudeCodeSystemPrompt,
+		"cache_control": map[string]any{"type": "ephemeral"},
+	}
+}
+
+func systemBlockText(block any) string {
+	value, _ := block.(map[string]any)
+	if value == nil {
+		return ""
+	}
+	text, _ := value["text"].(string)
+	return text
 }
 
 func detectOpenCodeMode(systemText string) string {
@@ -295,8 +356,10 @@ func prependClaudeCodeReminder(root map[string]any) {
 
 func standardizeMessagesHeaders(headers http.Header, sessionID string) {
 	headers.Set("Accept", "application/json")
+	headers.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+	headers.Set("Anthropic-Beta", claudeCodeBetaHeaderValue())
 	headers.Set("Anthropic-Dangerous-Direct-Browser-Access", "true")
-	headers.Set("User-Agent", "claude-cli/2.1.91 (external, cli)")
+	headers.Set("User-Agent", "claude-cli/2.1.156 (external, sdk-cli)")
 	headers.Set("X-App", "cli")
 	headers.Set("X-Claude-Code-Session-Id", sessionID)
 
@@ -305,13 +368,17 @@ func standardizeMessagesHeaders(headers http.Header, sessionID string) {
 	headers.Set("X-Stainless-Arch", "x64")
 	headers.Set("X-Stainless-Lang", "js")
 	headers.Set("X-Stainless-Os", "Linux")
-	headers.Set("X-Stainless-Package-Version", "0.80.0")
+	headers.Set("X-Stainless-Package-Version", "0.94.0")
 	headers.Set("X-Stainless-Retry-Count", "0")
 	headers.Set("X-Stainless-Runtime", "node")
 	headers.Set("X-Stainless-Runtime-Version", "v24.3.0")
 	headers.Set("X-Stainless-Timeout", "600")
 
-	for _, beta := range claudeCodeBetaHeaders {
-		ensureHeaderListValue(headers, "Anthropic-Beta", beta)
+}
+
+func claudeCodeBetaHeaderValue() string {
+	if len(claudeCodeBetaHeaders) <= 7 {
+		return strings.Join(claudeCodeBetaHeaders, ",")
 	}
+	return strings.Join(claudeCodeBetaHeaders[:7], ",") + ", " + strings.Join(claudeCodeBetaHeaders[7:], ", ")
 }
